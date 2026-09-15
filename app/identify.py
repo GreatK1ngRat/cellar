@@ -5,14 +5,23 @@ tier is authoritative -- the result is always shown to the person to
 confirm before it gets written to the database.
 """
 import base64
+import json
+import logging
 import os
 from datetime import datetime, timezone
 
 import httpx
 
+logger = logging.getLogger("cellar.identify")
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+
+# Open Food Facts asks every client to send a descriptive User-Agent and
+# blocks requests that look like generic bot traffic -- httpx's default
+# ("python-httpx/x.x") is exactly that pattern and gets a 403.
+OFF_USER_AGENT = "Cellar/1.0 (self-hosted personal wine log; no contact URL)"
 
 WINE_TYPES = ["red", "white", "rose", "sparkling", "dessert", "fortified"]
 
@@ -31,21 +40,26 @@ async def lookup_barcode(barcode: str) -> dict | None:
     url = f"https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url)
-    except httpx.HTTPError:
+            resp = await client.get(url, headers={"User-Agent": OFF_USER_AGENT})
+    except httpx.HTTPError as e:
+        logger.warning("barcode lookup: could not reach Open Food Facts for %s: %s", barcode, e)
         return None
 
     if resp.status_code != 200:
+        logger.info("barcode lookup: Open Food Facts returned %s for %s", resp.status_code, barcode)
         return None
     payload = resp.json()
     if payload.get("status") != 1:
+        logger.info("barcode lookup: %s not found in Open Food Facts", barcode)
         return None
 
     product = payload.get("product", {})
     name = product.get("product_name") or product.get("generic_name")
     if not name:
+        logger.info("barcode lookup: %s found but has no usable name field", barcode)
         return None
 
+    logger.info("barcode lookup: %s matched to %r", barcode, name)
     return {
         "name": name,
         "producer": product.get("brands"),
@@ -106,6 +120,7 @@ async def identify_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
     two separate paid integrations.
     """
     if not GEMINI_API_KEY:
+        logger.warning("identify_photo: called but GEMINI_API_KEY is not set")
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
                 "error": "GEMINI_API_KEY is not configured"}
 
@@ -131,23 +146,30 @@ async def identify_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(GEMINI_URL, json=body, headers=headers)
-    except httpx.HTTPError:
+    except httpx.HTTPError as e:
+        logger.error("identify_photo: could not reach Gemini: %s", e)
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
                 "error": "Could not reach Gemini"}
 
     if resp.status_code != 200:
+        logger.error("identify_photo: Gemini returned %s: %s", resp.status_code, resp.text[:500])
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
                 "error": f"Gemini request failed ({resp.status_code})"}
 
     payload = resp.json()
     output_text = payload.get("output_text", "")
-    import json
     try:
         result = json.loads(output_text)
     except (ValueError, TypeError):
+        logger.error("identify_photo: could not parse Gemini output as JSON: %r", output_text[:500])
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
                 "error": "Could not parse Gemini's response"}
 
+    logger.info(
+        "identify_photo: legible=%s listing_found=%s confidence=%s name=%r",
+        result.get("legible"), result.get("listing_found"),
+        result.get("listing_confidence"), result.get("name"),
+    )
     if result.get("image_url"):
         result["image_checked_at"] = None  # verified separately, see verify_image_url
     return result
@@ -173,6 +195,7 @@ async def identify_text(name: str, producer: str | None, vintage: str | None) ->
     better or working listing exists now.
     """
     if not GEMINI_API_KEY:
+        logger.warning("identify_text: called but GEMINI_API_KEY is not set")
         return {"listing_found": False, "listing_confidence": 0}
 
     query_bits = " ".join(b for b in [producer, name, vintage] if b)
@@ -196,18 +219,28 @@ async def identify_text(name: str, producer: str | None, vintage: str | None) ->
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(GEMINI_URL, json=body, headers=headers)
-    except httpx.HTTPError:
+    except httpx.HTTPError as e:
+        logger.error("identify_text: could not reach Gemini for %r: %s", query_bits, e)
         return {"listing_found": False, "listing_confidence": 0}
     if resp.status_code != 200:
+        logger.error("identify_text: Gemini returned %s for %r: %s",
+                      resp.status_code, query_bits, resp.text[:500])
         return {"listing_found": False, "listing_confidence": 0}
 
-    import json
+    output_text = resp.json().get("output_text", "")
     try:
-        result = json.loads(resp.json().get("output_text", ""))
+        result = json.loads(output_text)
     except (ValueError, TypeError):
+        logger.error("identify_text: could not parse Gemini output as JSON for %r: %r",
+                      query_bits, output_text[:500])
         return {"listing_found": False, "listing_confidence": 0}
+
+    logger.info("identify_text: %r -> listing_found=%s confidence=%s",
+                query_bits, result.get("listing_found"), result.get("listing_confidence"))
 
     if result.get("image_url") and not await verify_image_url(result["image_url"]):
+        logger.info("identify_text: found a listing but its image_url failed verification: %s",
+                     result["image_url"])
         result["image_url"] = None
         result["image_source"] = None
     return result
@@ -228,7 +261,10 @@ async def verify_image_url(url: str) -> bool:
             if resp.status_code >= 400 or "image" not in resp.headers.get("content-type", ""):
                 resp = await client.get(url)  # some servers don't support HEAD
                 if resp.status_code >= 400 or "image" not in resp.headers.get("content-type", ""):
+                    logger.info("verify_image_url: rejected %s (status=%s, content-type=%s)",
+                                url, resp.status_code, resp.headers.get("content-type"))
                     return False
         return True
-    except httpx.HTTPError:
+    except httpx.HTTPError as e:
+        logger.info("verify_image_url: could not reach %s: %s", url, e)
         return False
