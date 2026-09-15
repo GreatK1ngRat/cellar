@@ -138,6 +138,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 LOGIN_PAGE = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cellar</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <style>
   body{background:#12171a;color:#e9e5dc;font-family:system-ui,sans-serif;
        display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
