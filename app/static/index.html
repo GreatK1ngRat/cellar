@@ -48,6 +48,7 @@
     transition:background .12s linear,color .12s linear;
   }
   .btn:hover{background:transparent;color:var(--chalk)}
+  .btn:disabled{opacity:.45;cursor:default;pointer-events:none}
   .btn-ghost{background:transparent;color:var(--chalk);border-color:var(--chalk-faint)}
   .btn-ghost:hover{background:var(--chalk);color:var(--cellar);border-color:var(--chalk)}
   .btn-danger{background:transparent;color:var(--tallow);border-color:rgba(214,144,46,.45)}
@@ -229,6 +230,7 @@
   .sheet-foot{display:flex;gap:var(--s2);padding:var(--s3) var(--s5);
     border-top:1px solid var(--rule);flex:none;background:var(--cellar)}
   .sheet-foot .btn{flex:1;padding:11px 6px}
+  .sheet-foot .confirm-text{flex:1;display:flex;align-items:center;font-size:13px;color:var(--chalk-dim)}
 
   .detail-plate{width:140px;margin-bottom:var(--s4)}
   .detail-name{font-family:"Bodoni Moda",Georgia,serif;font-weight:500;font-size:34px;
@@ -413,9 +415,8 @@
     <button class="close" data-close aria-label="Close">×</button>
   </div>
   <div class="sheet-body" id="detailBody"></div>
-  <div class="sheet-foot">
+  <div class="sheet-foot" id="detailFoot">
     <button class="btn btn-ghost" id="editWine">Edit</button>
-    <button class="btn btn-ghost" id="findImage">Find a new image</button>
     <button class="btn btn-danger" id="deleteWine">Delete</button>
   </div>
 </aside>
@@ -476,8 +477,7 @@
         </div>
       </div>
       <div class="notes-label">Other possibilities</div>
-      <button class="alt"><b>Grüner Veltliner Federspiel</b> 2022 <span class="pct">71%</span></button>
-      <button class="alt"><b>Grüner Veltliner Smaragd</b> 2021 <span class="pct">63%</span></button>
+      <div id="matchAlts"></div>
       <button class="alt" id="toManual">None of these — enter it myself</button>
     </div>
 
@@ -541,9 +541,15 @@
         <label for="f-where">Tasted at</label>
         <input id="f-where" placeholder="Osteria Rossi — Marco's recommendation">
       </div>
-      <div class="field">
-        <label for="f-source">Where to find it</label>
-        <input id="f-source" placeholder="Berry St Wines, about $42">
+      <div class="field-row">
+        <div class="field">
+          <label for="f-source">Where to find it</label>
+          <input id="f-source" placeholder="Berry St Wines">
+        </div>
+        <div class="field">
+          <label for="f-price">Roughly</label>
+          <input id="f-price" placeholder="~$42">
+        </div>
       </div>
       <div class="field">
         <label for="f-notes">Notes</label>
@@ -763,9 +769,29 @@ function renderSaid(w){
     </div>`;
 }
 
+let confirmingDelete = false;
+let deletingWine = false;
+
+function renderDetailFoot(){
+  const foot = document.getElementById("detailFoot");
+  if(confirmingDelete){
+    foot.innerHTML = `
+      <span class="confirm-text">Remove this wine?</span>
+      <button class="btn btn-ghost" id="cancelDelete" ${deletingWine ? "disabled" : ""}>Cancel</button>
+      <button class="btn btn-danger" id="confirmDelete" ${deletingWine ? "disabled" : ""}>${deletingWine ? "Removing…" : "Yes, remove"}</button>`;
+  } else {
+    foot.innerHTML = `
+      <button class="btn btn-ghost" id="editWine">Edit</button>
+      <button class="btn btn-danger" id="deleteWine">Delete</button>`;
+  }
+}
+
 function openDetail(name){
   const w = WINES.find(x => x.name === name);
   if(!w) return;
+  confirmingDelete = false;
+  deletingWine = false;
+
   const imgRows = w.imageSource
     ? `<div class="fact"><dt>Image from</dt><dd><a href="#" onclick="return false">${w.imageSource}</a></dd></div>
        <div class="fact"><dt>Link checked</dt><dd>${fmtDate(w.imageChecked)}</dd></div>`
@@ -774,21 +800,22 @@ function openDetail(name){
   document.getElementById("detailBody").innerHTML = `
     ${plate(w,"plate detail-plate")}
     <h2 class="detail-name">${w.name}</h2>
-    <p class="detail-producer">${w.producer}</p>
+    <p class="detail-producer">${w.producer || "—"}</p>
     <dl class="facts">
       <div class="fact"><dt>Type</dt><dd class="with-icon">${typeIcon(w.type)}${TYPES[w.type].label}</dd></div>
-      <div class="fact"><dt>Vintage</dt><dd>${w.vintage}</dd></div>
-      <div class="fact"><dt>Region</dt><dd>${w.region}</dd></div>
-      <div class="fact"><dt>Grape</dt><dd>${w.grape}</dd></div>
+      <div class="fact"><dt>Vintage</dt><dd>${w.vintage || "—"}</dd></div>
+      <div class="fact"><dt>Region</dt><dd>${w.region || "—"}</dd></div>
+      <div class="fact"><dt>Grape</dt><dd>${w.grape || "—"}</dd></div>
       <div class="fact"><dt>Rating</dt><dd>${w.rating.toFixed(1)} of 5</dd></div>
       <div class="fact"><dt>Tasted on</dt><dd>${fmtDate(w.tasted)}</dd></div>
-      <div class="fact"><dt>Tasted at</dt><dd class="wine">${w.where}</dd></div>
-      <div class="fact"><dt>Roughly</dt><dd>${w.price}</dd></div>
-      <div class="fact"><dt>Find it at</dt><dd class="wine">${w.source}</dd></div>
+      <div class="fact"><dt>Tasted at</dt><dd class="wine">${w.where || "—"}</dd></div>
+      <div class="fact"><dt>Roughly</dt><dd>${w.price || "—"}</dd></div>
+      <div class="fact"><dt>Find it at</dt><dd class="wine">${w.source || "—"}</dd></div>
       ${imgRows}
     </dl>
     <div class="notes-label">Notes</div>
-    <p class="notes">${w.notes}</p>`;
+    <p class="notes">${w.notes || "—"}</p>`;
+  renderDetailFoot();
   open(document.getElementById("detailSheet"));
 }
 
@@ -878,16 +905,27 @@ async function runPhotoScan(file){
       showStep("nomatch");
       return;
     }
+
+    /* OpenRouter can return producer/vintage when the label shows them --
+       never assume null, use whatever actually came back. */
     pendingMatch = {
-      name: result.name, producer: result.producer, type: result.wine_type,
-      vintage: result.vintage, imageUrl: result.image_url, imageSource: result.image_source
+      name: result.name, producer: result.producer || null, type: null,
+      vintage: result.vintage || null, imageUrl: null, imageSource: null
     };
-    if(result.listing_found && result.listing_confidence >= 0.6){
-      document.getElementById("matchArt").innerHTML = labelArt({producer: result.producer, vintage: result.vintage || "—"});
+
+    if(result.listing_found){
+      document.getElementById("matchArt").innerHTML = labelArt({producer: pendingMatch.producer, vintage: pendingMatch.vintage || "—"});
       document.querySelector("#step-match .match-name").textContent = result.name || "Untitled";
-      document.querySelector("#step-match .match-producer").textContent = [result.producer, result.vintage].filter(Boolean).join(", ");
-      document.querySelector("#step-match .match-src span").textContent = `Image from ${result.image_source || "a listing"}`;
+      document.querySelector("#step-match .match-producer").textContent =
+        [pendingMatch.producer, pendingMatch.vintage].filter(Boolean).join(", ")
+        || "Producer and vintage not identified — fill in on the next screen";
+      document.querySelector("#step-match .match-src span").textContent = "Matched by label image, no listing photo available";
       document.querySelector("#step-match .conf").textContent = `${Math.round(result.listing_confidence*100)}% match`;
+
+      const alts = result.candidates || [];
+      document.getElementById("matchAlts").innerHTML = alts.length
+        ? alts.map(c => `<button class="alt" data-alt-name="${c.label}"><b>${c.label}</b><span class="pct">${Math.round(c.confidence*100)}%</span></button>`).join("")
+        : "";
       showStep("match");
     } else {
       showStep("nomatch");
@@ -905,8 +943,8 @@ function fillForm(matched){
 
   if(matched && pendingMatch){
     banner.className = "banner";
-    banner.innerHTML = `<div><b>Filled in from ${pendingMatch.imageSource || "the lookup"}.</b> Check the vintage — listings
-      often show a different year than the bottle in front of you.</div>`;
+    banner.innerHTML = `<div><b>Name filled in from the label match.</b> Producer, vintage, region and
+      grape weren't identified — fill in what you know below.</div>`;
     set("f-name", pendingMatch.name);
     set("f-producer", pendingMatch.producer);
     if(pendingMatch.type) document.getElementById("f-type").value = typeLabel(pendingMatch.type);
@@ -936,6 +974,7 @@ function openEditForm(w){
   document.getElementById("f-rating").value = (w.rating || 4.0).toFixed(1);
   document.getElementById("f-where").value = w.where || "";
   document.getElementById("f-source").value = w.source || "";
+  document.getElementById("f-price").value = w.price || "";
   document.getElementById("f-notes").value = w.notes || "";
   document.getElementById("formBanner").className = "banner";
   document.getElementById("formBanner").innerHTML = "<div>Editing this wine's details.</div>";
@@ -944,7 +983,11 @@ function openEditForm(w){
   open(document.getElementById("addSheet"));
 }
 
+let savingWine = false;
+
 async function saveWine(){
+  if(savingWine) return;
+
   const typeKey = {Red:"red",White:"white",Rosé:"rose",Sparkling:"sparkling",Dessert:"dessert",Fortified:"fortified"}[document.getElementById("f-type").value] || "red";
   const w = {
     name: document.getElementById("f-name").value.trim(),
@@ -957,6 +1000,7 @@ async function saveWine(){
     rating: parseFloat(document.getElementById("f-rating").value),
     where: document.getElementById("f-where").value.trim(),
     source: document.getElementById("f-source").value.trim(),
+    price: document.getElementById("f-price").value.trim(),
     notes: document.getElementById("f-notes").value.trim(),
     imageUrl: pendingMatch ? pendingMatch.imageUrl : (editingId ? undefined : null),
     imageSource: pendingMatch ? pendingMatch.imageSource : (editingId ? undefined : null),
@@ -967,14 +1011,26 @@ async function saveWine(){
   const row = toRow(w);
   Object.keys(row).forEach(k => row[k] === undefined && delete row[k]);
 
-  if(editingId){
-    await api(`/api/wines/${editingId}`, {method:"PUT", body: JSON.stringify(row)});
-  } else {
-    await api("/api/wines", {method:"POST", body: JSON.stringify(row)});
+  const btn = document.getElementById("saveWine");
+  const originalLabel = btn.textContent;
+  savingWine = true;
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+
+  try{
+    if(editingId){
+      await api(`/api/wines/${editingId}`, {method:"PUT", body: JSON.stringify(row)});
+    } else {
+      await api("/api/wines", {method:"POST", body: JSON.stringify(row)});
+    }
+    editingId = null; pendingMatch = null;
+    closeAll();
+    await loadWines();
+  } finally {
+    savingWine = false;
+    btn.disabled = false;
+    btn.textContent = originalLabel;
   }
-  editingId = null; pendingMatch = null;
-  closeAll();
-  await loadWines();
 }
 
 /* ---------- sheet plumbing ---------- */
@@ -1009,7 +1065,7 @@ document.addEventListener("click", e => {
   if(e.target.closest("#openAdd")){
     editingId = null; pendingMatch = null;
     document.getElementById("f-barcode").value = "";
-    ["f-name","f-producer","f-vintage","f-region","f-grape","f-where","f-source","f-notes"]
+    ["f-name","f-producer","f-vintage","f-region","f-grape","f-where","f-source","f-price","f-notes"]
       .forEach(id => document.getElementById(id).value = "");
     showStep("capture");
     return open(document.getElementById("addSheet"));
@@ -1019,7 +1075,12 @@ document.addEventListener("click", e => {
   if(e.target.closest("#rescan")) return showStep("capture");
   if(e.target.closest("#useMatch")){ fillForm(true); return showStep("form"); }
   if(e.target.closest("#toManual") || e.target.closest("#toManualFoot")){ pendingMatch = null; fillForm(false); return showStep("form"); }
-  if(e.target.closest(".alt") && !e.target.closest("#toManual")){ fillForm(true); return showStep("form"); }
+  const altBtn = e.target.closest(".alt[data-alt-name]");
+  if(altBtn){
+    if(pendingMatch) pendingMatch.name = altBtn.dataset.altName;
+    fillForm(true);
+    return showStep("form");
+  }
   if(e.target.closest("#saveWine")) return saveWine();
 
   if(e.target.closest("#editWine")){
@@ -1028,26 +1089,25 @@ document.addEventListener("click", e => {
     return;
   }
   if(e.target.closest("#deleteWine")){
-    const w = WINES.find(x => x.name === lit);
-    if(w && confirm(`Remove "${w.name}" from the list?`)){
-      api(`/api/wines/${w.id}`, {method:"DELETE"}).then(closeAll).then(loadWines);
-    }
+    confirmingDelete = true;
+    renderDetailFoot();
     return;
   }
-  if(e.target.closest("#findImage")){
+  if(e.target.closest("#cancelDelete")){
+    confirmingDelete = false;
+    renderDetailFoot();
+    return;
+  }
+  if(e.target.closest("#confirmDelete")){
+    if(deletingWine) return;
     const w = WINES.find(x => x.name === lit);
     if(!w) return;
-    api("/api/identify/text", {method:"POST", body: JSON.stringify({
-      name: w.name, producer: w.producer, vintage: w.vintage
-    })}).then(result => {
-      if(result.image_url){
-        return api(`/api/wines/${w.id}`, {method:"PUT", body: JSON.stringify({
-          image_url: result.image_url, image_source: result.image_source,
-          image_checked_at: new Date().toISOString()
-        })}).then(loadWines).then(() => openDetail(w.name));
-      }
-      alert("No new image found for this wine.");
-    });
+    deletingWine = true;
+    renderDetailFoot();
+    api(`/api/wines/${w.id}`, {method:"DELETE"})
+      .then(closeAll)
+      .then(loadWines)
+      .finally(() => { deletingWine = false; });
     return;
   }
 
