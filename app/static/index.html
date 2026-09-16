@@ -686,7 +686,9 @@ function visible(){
 function renderStanding(){
   document.getElementById("totalCount").textContent = WINES.length;
   const newest = [...WINES].sort((a,b)=>b.tasted.localeCompare(a.tasted))[0];
-  document.getElementById("lastAdded").textContent = "Last added " + fmtDate(newest.tasted);
+  document.getElementById("lastAdded").textContent = newest
+    ? "Last added " + fmtDate(newest.tasted)
+    : "Nothing logged yet";
 
   const counts = {};
   WINES.forEach(w => counts[w.type] = (counts[w.type]||0)+1);
@@ -1043,7 +1045,6 @@ function open(sheet){
   sheet.querySelector(".close").focus();
 }
 function closeAll(){
-  scanTimers.forEach(clearTimeout); scanTimers = [];
   document.querySelectorAll(".sheet").forEach(s => s.classList.remove("open"));
   scrim.classList.remove("open");
   document.body.style.overflow = "";
