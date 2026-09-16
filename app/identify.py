@@ -1,4 +1,4 @@
-"""Wine identification: barcode lookup first, Gemini vision + search second.
+"""Wine identification: barcode lookup first, a free vision model second.
 
 Both tiers are free at the volume a personal wine log produces. Neither
 tier is authoritative -- the result is always shown to the person to
@@ -14,10 +14,6 @@ import httpx
 
 logger = logging.getLogger("cellar.identify")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
-
 # Open Food Facts asks every client to send a descriptive User-Agent and
 # blocks requests that look like generic bot traffic -- httpx's default
 # ("python-httpx/x.x") is exactly that pattern and gets a 403.
@@ -31,7 +27,7 @@ async def lookup_barcode(barcode: str) -> dict | None:
 
     Coverage is grocery-and-supermarket weighted, so this misses often for
     small producers, restaurant pours, and anything without a barcode at
-    all -- that's expected, and the caller falls through to Gemini.
+    all -- that's expected, and the caller falls through to the photo tier.
     """
     barcode = barcode.strip()
     if not barcode:
@@ -70,180 +66,132 @@ async def lookup_barcode(barcode: str) -> dict | None:
     }
 
 
-IDENTIFY_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "legible": {"type": "boolean"},
-        "name": {"type": ["string", "null"]},
-        "producer": {"type": ["string", "null"]},
-        "vintage": {"type": ["string", "null"]},
-        "wine_type": {"type": ["string", "null"], "enum": WINE_TYPES + [None]},
-        "read_directly": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "boolean"},
-                "producer": {"type": "boolean"},
-                "vintage": {"type": "boolean"},
-            },
-        },
-        "listing_found": {"type": "boolean"},
-        "listing_confidence": {"type": "number"},
-        "listing_url": {"type": ["string", "null"]},
-        "image_url": {"type": ["string", "null"]},
-        "image_source": {"type": ["string", "null"]},
-    },
-    "required": ["legible", "listing_found", "listing_confidence"],
-}
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "inclusionai/ling-3.0-flash-vl:free")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-IDENTIFY_PROMPT = """You are reading a photo of a wine label to help catalogue it.
+# Confidence (self-reported by the model) above which a match is shown as
+# "the" match rather than routed to a plain no-match screen. No published
+# guidance on a good cutoff for this -- starting assumption to tune once
+# real results come in.
+MATCH_CONFIDENCE_THRESHOLD = 0.6
 
-Step 1 -- read only what is printed on the label. Do not infer or guess a
-field from general knowledge; if it is not legible, leave it null and set
-the matching read_directly flag to false.
 
-Step 2 -- if the label was legible, use web search to find a real product
-listing for this exact wine and vintage (a retailer or a site like
-Wine-Searcher). Only report listing_found as true if you are genuinely
-confident it is the same wine, not just the same producer or a similar
-label. Set listing_confidence from 0 to 1. If you find a listing, include
-its page URL and, if visible in the search result, a direct product image
-URL and the domain it came from.
+# This free model does not support forced JSON output (no response_format
+# support) -- the prompt has to ask for plain JSON and the parser has to
+# tolerate stray text or markdown fences around it rather than assume a
+# clean object back.
+OPENROUTER_PROMPT = """Read this photo of a wine label.
 
-Respond only with JSON matching the provided schema."""
+Respond with ONLY a single JSON object, no markdown code fences, no
+explanation before or after it. Use this exact shape:
+
+{"legible": true or false, "name": string or null, "producer": string or null,
+ "vintage": string or null, "confidence": a number from 0 to 1 for how sure
+ you are this reading is correct}
+
+Only fill in a field if it is actually printed on the label -- if something
+is not legible or not present, use null for it rather than guessing. If the
+photo is too blurry, dark, or cropped to read at all, set legible to false
+and leave the other fields null."""
+
+
+def _extract_json_object(text: str) -> dict | None:
+    """Pulls a JSON object out of a model's plain-text reply.
+
+    Handles the common ways an unconstrained model wraps its JSON: markdown
+    code fences, or a sentence before/after the object. Returns None if
+    nothing parseable is found rather than raising.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except ValueError:
+        return None
 
 
 async def identify_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
-    """Tier 2: Gemini reads the label and searches for a listing.
+    """Tier 2: a free vision-capable model via OpenRouter reads the label
+    directly. No fixed label database, no web search -- it reads whatever
+    text and imagery is actually in the photo and reports what it found.
 
-    One call does both jobs -- vision extraction and grounded web search --
-    which keeps this to a single free-tier request per bottle instead of
-    two separate paid integrations.
+    Like every other tier here, this only identifies the wine -- no
+    listing image or URL. See BACKLOG.md for that history.
     """
-    if not GEMINI_API_KEY:
-        logger.warning("identify_photo: called but GEMINI_API_KEY is not set")
+    if not OPENROUTER_API_KEY:
+        logger.warning("identify_photo: called but OPENROUTER_API_KEY is not set")
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
-                "error": "GEMINI_API_KEY is not configured"}
+                "error": "OPENROUTER_API_KEY is not configured"}
 
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
     body = {
-        "model": GEMINI_MODEL,
-        "input": [
-            {"type": "text", "text": IDENTIFY_PROMPT},
-            {
-                "type": "image",
-                "data": base64.b64encode(image_bytes).decode("utf-8"),
-                "mime_type": mime_type,
-            },
-        ],
-        "tools": [{"type": "google_search"}],
-        "response_format": {
-            "type": "text",
-            "mime_type": "application/json",
-            "schema": IDENTIFY_SCHEMA,
-        },
+        "model": OPENROUTER_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": OPENROUTER_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+            ],
+        }],
     }
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(GEMINI_URL, json=body, headers=headers)
+            resp = await client.post(OPENROUTER_URL, json=body, headers=headers)
     except httpx.HTTPError as e:
-        logger.error("identify_photo: could not reach Gemini: %s", e)
+        logger.error("identify_photo: could not reach OpenRouter: %s", e)
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
-                "error": "Could not reach Gemini"}
+                "error": "Could not reach OpenRouter"}
 
     if resp.status_code != 200:
-        logger.error("identify_photo: Gemini returned %s: %s", resp.status_code, resp.text[:500])
+        logger.error("identify_photo: OpenRouter returned %s: %s", resp.status_code, resp.text[:500])
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
-                "error": f"Gemini request failed ({resp.status_code})"}
+                "error": f"OpenRouter request failed ({resp.status_code})"}
 
-    payload = resp.json()
-    output_text = payload.get("output_text", "")
     try:
-        result = json.loads(output_text)
-    except (ValueError, TypeError):
-        logger.error("identify_photo: could not parse Gemini output as JSON: %r", output_text[:500])
+        content = resp.json()["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError):
+        logger.error("identify_photo: unexpected OpenRouter response shape: %r", resp.text[:500])
         return {"legible": False, "listing_found": False, "listing_confidence": 0,
-                "error": "Could not parse Gemini's response"}
+                "error": "Could not parse OpenRouter's response"}
 
-    logger.info(
-        "identify_photo: legible=%s listing_found=%s confidence=%s name=%r",
-        result.get("legible"), result.get("listing_found"),
-        result.get("listing_confidence"), result.get("name"),
-    )
-    if result.get("image_url"):
-        result["image_checked_at"] = None  # verified separately, see verify_image_url
-    return result
+    parsed = _extract_json_object(content)
+    if parsed is None:
+        logger.error("identify_photo: could not extract JSON from OpenRouter's reply: %r", content[:500])
+        return {"legible": False, "listing_found": False, "listing_confidence": 0,
+                "error": "Could not parse OpenRouter's response"}
 
+    legible = bool(parsed.get("legible"))
+    confidence = parsed.get("confidence") or 0
+    name = parsed.get("name")
 
-TEXT_SEARCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "listing_found": {"type": "boolean"},
-        "listing_confidence": {"type": "number"},
-        "image_url": {"type": ["string", "null"]},
-        "image_source": {"type": ["string", "null"]},
-    },
-    "required": ["listing_found", "listing_confidence"],
-}
+    logger.info("identify_photo: OpenRouter (%s) legible=%s name=%r confidence=%s",
+                OPENROUTER_MODEL, legible, name, confidence)
 
+    if not legible or not name:
+        return {"legible": legible, "listing_found": False, "listing_confidence": 0}
 
-async def identify_text(name: str, producer: str | None, vintage: str | None) -> dict:
-    """Re-searches for a listing image from known fields, no photo involved.
-
-    Used by "find a new image" on a wine that already exists -- the identity
-    is already trusted, this just tries the search step again in case a
-    better or working listing exists now.
-    """
-    if not GEMINI_API_KEY:
-        logger.warning("identify_text: called but GEMINI_API_KEY is not set")
-        return {"listing_found": False, "listing_confidence": 0}
-
-    query_bits = " ".join(b for b in [producer, name, vintage] if b)
-    prompt = (f'Find a real product listing for the wine "{query_bits}" using web search. '
-              "Only report listing_found as true if you are confident it is the same wine. "
-              "If found, include a direct product image URL and the domain it came from. "
-              "Respond only with JSON matching the provided schema.")
-
-    body = {
-        "model": GEMINI_MODEL,
-        "input": [{"type": "text", "text": prompt}],
-        "tools": [{"type": "google_search"}],
-        "response_format": {
-            "type": "text",
-            "mime_type": "application/json",
-            "schema": TEXT_SEARCH_SCHEMA,
-        },
+    return {
+        "legible": True,
+        "listing_found": confidence >= MATCH_CONFIDENCE_THRESHOLD,
+        "listing_confidence": confidence,
+        "name": name,
+        "producer": parsed.get("producer"),
+        "vintage": parsed.get("vintage"),
+        "wine_type": None,
+        "image_url": None,
+        "image_source": None,
+        "candidates": [],
     }
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(GEMINI_URL, json=body, headers=headers)
-    except httpx.HTTPError as e:
-        logger.error("identify_text: could not reach Gemini for %r: %s", query_bits, e)
-        return {"listing_found": False, "listing_confidence": 0}
-    if resp.status_code != 200:
-        logger.error("identify_text: Gemini returned %s for %r: %s",
-                      resp.status_code, query_bits, resp.text[:500])
-        return {"listing_found": False, "listing_confidence": 0}
-
-    output_text = resp.json().get("output_text", "")
-    try:
-        result = json.loads(output_text)
-    except (ValueError, TypeError):
-        logger.error("identify_text: could not parse Gemini output as JSON for %r: %r",
-                      query_bits, output_text[:500])
-        return {"listing_found": False, "listing_confidence": 0}
-
-    logger.info("identify_text: %r -> listing_found=%s confidence=%s",
-                query_bits, result.get("listing_found"), result.get("listing_confidence"))
-
-    if result.get("image_url") and not await verify_image_url(result["image_url"]):
-        logger.info("identify_text: found a listing but its image_url failed verification: %s",
-                     result["image_url"])
-        result["image_url"] = None
-        result["image_source"] = None
-    return result
 
 
 async def verify_image_url(url: str) -> bool:
