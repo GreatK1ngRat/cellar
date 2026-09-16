@@ -65,6 +65,10 @@
   .mark .stop{color:var(--tallow)}
   .mark-sub{font-size:13px;color:var(--chalk-dim)}
   .masthead .spacer{flex:1}
+  .whoami{font-size:12.5px;color:var(--chalk-dim)}
+  .user-row{display:flex;align-items:center;justify-content:space-between;
+    padding:9px 0;border-bottom:1px solid var(--rule);font-size:13.5px}
+  .user-row .btn{padding:5px 12px;font-size:11.5px}
 
   /* ---------- standing count ---------- */
 
@@ -179,6 +183,8 @@
 
   .said{display:grid;grid-template-columns:repeat(12,1fr);gap:var(--s4);padding:var(--s6) 0 var(--s7)}
   .said-key{grid-column:1 / span 3;font-size:13px;color:var(--chalk-dim);padding-top:10px}
+  .said-marked{font-size:12px;color:var(--tallow);font-weight:600;margin-bottom:8px;
+    letter-spacing:.02em;text-transform:uppercase}
   .said-body{grid-column:5 / span 8}
   .said-note{
     font-family:"Bodoni Moda",Georgia,serif;font-size:clamp(20px,2.3vw,27px);
@@ -362,6 +368,9 @@
     <h1 class="mark">Cellar<span class="stop">.</span></h1>
     <span class="mark-sub">Wines to buy again</span>
     <span class="spacer"></span>
+    <span class="whoami" id="whoami"></span>
+    <button class="btn btn-ghost" id="manageUsers" style="display:none">Manage users</button>
+    <button class="btn btn-ghost" id="logout">Log out</button>
     <button class="btn" id="openAdd">Scan a bottle</button>
   </header>
 
@@ -421,6 +430,29 @@
   </div>
 </aside>
 
+<aside class="sheet" id="usersSheet" role="dialog" aria-modal="true" aria-label="Manage users">
+  <div class="sheet-head">
+    <span class="sheet-eyebrow">Accounts</span>
+    <button class="close" data-close aria-label="Close">×</button>
+  </div>
+  <div class="sheet-body">
+    <div class="notes-label">Add a user</div>
+    <div class="field">
+      <label for="nu-username">Username</label>
+      <input id="nu-username" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="nu-password">Password</label>
+      <input id="nu-password" type="password" placeholder="At least 10 characters">
+    </div>
+    <button class="btn" id="createUser" style="width:100%;margin-bottom:var(--s5)">Add user</button>
+    <p id="userFormError" class="said-marked" style="display:none"></p>
+
+    <div class="notes-label">Existing users</div>
+    <div id="usersList"></div>
+  </div>
+</aside>
+
 <aside class="sheet" id="addSheet" role="dialog" aria-modal="true" aria-label="Scan a bottle">
   <div class="sheet-head">
     <span class="sheet-eyebrow" id="addEyebrow">Scan a bottle</span>
@@ -449,6 +481,9 @@
         Your photo is only used to identify the wine. Once it's matched, the app links to the
         listing's image and discards what you took.
       </p>
+      <button class="alt" id="skipToManual" style="margin-top:var(--s4)">
+        Or enter it myself, no scanning
+      </button>
     </div>
 
     <!-- 2. scanning -->
@@ -586,7 +621,8 @@ function fromRow(r){
     vintage: r.vintage, region: r.region, grape: r.grape, price: r.price,
     rating: r.rating, tasted: r.tasted_at, where: r.where_tasted, source: r.source,
     notes: r.notes, imageUrl: r.image_url, imageSource: r.image_source,
-    imageChecked: r.image_checked_at
+    imageChecked: r.image_checked_at, addedBy: r.added_by,
+    markedForDeletion: !!r.marked_for_deletion, markedBy: r.marked_by
   };
 }
 
@@ -610,6 +646,20 @@ async function loadWines(){
   const rows = await api("/api/wines");
   WINES = rows.map(fromRow);
   renderStanding(); renderChips(); renderRack();
+}
+
+async function loadUsers(){
+  const users = await api("/api/users");
+  const list = document.getElementById("usersList");
+  if(!users.length){
+    list.innerHTML = `<p class="dim">No accounts yet besides admin.</p>`;
+    return;
+  }
+  list.innerHTML = users.map(u => `
+    <div class="user-row" data-user-id="${u.id}">
+      <span>${u.username}</span>
+      <button class="btn btn-ghost" data-delete-user="${u.id}">Remove</button>
+    </div>`).join("");
 }
 
 /* Type badge: one bottle, tilted in the rack. Colour carries the type; a label
@@ -755,17 +805,23 @@ function renderSaid(w){
   const src = w.imageSource
     ? `<div><dt>Image linked from</dt><dd>${w.imageSource}, checked ${fmtDate(w.imageChecked)}</dd></div>`
     : `<div><dt>Image</dt><dd class="none">None found</dd></div>`;
+  const addedBy = w.addedBy
+    ? `<div><dt>Added by</dt><dd>${w.addedBy}</dd></div>` : "";
+  const marked = w.markedForDeletion
+    ? `<div class="said-marked">Marked for deletion by ${w.markedBy || "someone"}</div>` : "";
 
   document.getElementById("said").innerHTML = `
-    <div class="said-key">Tasted ${fmtDate(w.tasted)}<br>${w.where}</div>
+    ${marked}
+    <div class="said-key">Tasted ${fmtDate(w.tasted)}<br>${w.where || "—"}</div>
     <div class="said-body">
-      <p class="said-note">${w.notes}</p>
+      <p class="said-note">${w.notes || "—"}</p>
       <dl class="said-specs">
-        <div><dt>Region</dt><dd>${w.region}</dd></div>
-        <div><dt>Grape</dt><dd>${w.grape}</dd></div>
-        <div><dt>Vintage</dt><dd>${w.vintage}</dd></div>
-        <div><dt>Roughly</dt><dd>${w.price}</dd></div>
-        <div><dt>Find it at</dt><dd>${w.source}</dd></div>
+        <div><dt>Region</dt><dd>${w.region || "—"}</dd></div>
+        <div><dt>Grape</dt><dd>${w.grape || "—"}</dd></div>
+        <div><dt>Vintage</dt><dd>${w.vintage || "—"}</dd></div>
+        <div><dt>Roughly</dt><dd>${w.price || "—"}</dd></div>
+        <div><dt>Find it at</dt><dd>${w.source || "—"}</dd></div>
+        ${addedBy}
         ${src}
       </dl>
     </div>`;
@@ -773,19 +829,36 @@ function renderSaid(w){
 
 let confirmingDelete = false;
 let deletingWine = false;
+let markingWine = false;
+let currentUser = null;   // {username, role} -- set from /api/me on load
 
 function renderDetailFoot(){
   const foot = document.getElementById("detailFoot");
+  const w = WINES.find(x => x.name === lit);
+  const isAdmin = currentUser && currentUser.role === "admin";
+
   if(confirmingDelete){
     foot.innerHTML = `
       <span class="confirm-text">Remove this wine?</span>
       <button class="btn btn-ghost" id="cancelDelete" ${deletingWine ? "disabled" : ""}>Cancel</button>
       <button class="btn btn-danger" id="confirmDelete" ${deletingWine ? "disabled" : ""}>${deletingWine ? "Removing…" : "Yes, remove"}</button>`;
-  } else {
+    return;
+  }
+
+  if(isAdmin){
     foot.innerHTML = `
       <button class="btn btn-ghost" id="editWine">Edit</button>
       <button class="btn btn-danger" id="deleteWine">Delete</button>`;
+    return;
   }
+
+  // Non-admins can't delete outright -- only flag it for an admin to action.
+  const marked = w && w.markedForDeletion;
+  foot.innerHTML = `
+    <button class="btn btn-ghost" id="editWine">Edit</button>
+    <button class="btn ${marked ? "btn-ghost" : "btn-danger"}" id="markWine" ${markingWine ? "disabled" : ""}>
+      ${markingWine ? "…" : marked ? "Unmark" : "Mark for deletion"}
+    </button>`;
 }
 
 function openDetail(name){
@@ -798,8 +871,13 @@ function openDetail(name){
     ? `<div class="fact"><dt>Image from</dt><dd><a href="#" onclick="return false">${w.imageSource}</a></dd></div>
        <div class="fact"><dt>Link checked</dt><dd>${fmtDate(w.imageChecked)}</dd></div>`
     : `<div class="fact"><dt>Image</dt><dd class="none">None found — try scanning again</dd></div>`;
+  const addedByRow = w.addedBy
+    ? `<div class="fact"><dt>Added by</dt><dd>${w.addedBy}</dd></div>` : "";
+  const markedBanner = w.markedForDeletion
+    ? `<p class="said-marked">Marked for deletion by ${w.markedBy || "someone"}</p>` : "";
 
   document.getElementById("detailBody").innerHTML = `
+    ${markedBanner}
     ${plate(w,"plate detail-plate")}
     <h2 class="detail-name">${w.name}</h2>
     <p class="detail-producer">${w.producer || "—"}</p>
@@ -813,6 +891,7 @@ function openDetail(name){
       <div class="fact"><dt>Tasted at</dt><dd class="wine">${w.where || "—"}</dd></div>
       <div class="fact"><dt>Roughly</dt><dd>${w.price || "—"}</dd></div>
       <div class="fact"><dt>Find it at</dt><dd class="wine">${w.source || "—"}</dd></div>
+      ${addedByRow}
       ${imgRows}
     </dl>
     <div class="notes-label">Notes</div>
@@ -851,6 +930,7 @@ function showStep(id){
 }
 
 let pendingMatch = null;   // what the last successful lookup found, before you confirm it
+let lastCandidates = [];   // full candidate objects from the last photo scan, for alt picking
 let editingId = null;      // set when the form is editing an existing wine, not adding one
 
 function stepScanning(){
@@ -915,18 +995,26 @@ async function runPhotoScan(file){
       vintage: result.vintage || null, imageUrl: null, imageSource: null
     };
 
-    if(result.listing_found){
+    lastCandidates = result.name
+      ? [{name: result.name, producer: result.producer, vintage: result.vintage,
+          confidence: result.listing_confidence},
+         ...(result.candidates || [])]
+      : [];
+
+    if(lastCandidates.length){
       document.getElementById("matchArt").innerHTML = labelArt({producer: pendingMatch.producer, vintage: pendingMatch.vintage || "—"});
       document.querySelector("#step-match .match-name").textContent = result.name || "Untitled";
       document.querySelector("#step-match .match-producer").textContent =
         [pendingMatch.producer, pendingMatch.vintage].filter(Boolean).join(", ")
         || "Producer and vintage not identified — fill in on the next screen";
-      document.querySelector("#step-match .match-src span").textContent = "Matched by label image, no listing photo available";
-      document.querySelector("#step-match .conf").textContent = `${Math.round(result.listing_confidence*100)}% match`;
+      document.querySelector("#step-match .match-src span").textContent = result.listing_found
+        ? "Matched by label image, no listing photo available"
+        : "Not fully confident — check this is right, or pick another guess below";
+      document.querySelector("#step-match .conf").textContent = `${Math.round((result.listing_confidence||0)*100)}% match`;
 
-      const alts = result.candidates || [];
+      const alts = lastCandidates.slice(1);
       document.getElementById("matchAlts").innerHTML = alts.length
-        ? alts.map(c => `<button class="alt" data-alt-name="${c.label}"><b>${c.label}</b><span class="pct">${Math.round(c.confidence*100)}%</span></button>`).join("")
+        ? alts.map((c,i) => `<button class="alt" data-alt-index="${i+1}"><b>${c.name}</b><span class="pct">${Math.round((c.confidence||0)*100)}%</span></button>`).join("")
         : "";
       showStep("match");
     } else {
@@ -1075,10 +1163,15 @@ document.addEventListener("click", e => {
   if(e.target.closest("#startScan")) return document.getElementById("photoInput").click();
   if(e.target.closest("#rescan")) return showStep("capture");
   if(e.target.closest("#useMatch")){ fillForm(true); return showStep("form"); }
-  if(e.target.closest("#toManual") || e.target.closest("#toManualFoot")){ pendingMatch = null; fillForm(false); return showStep("form"); }
-  const altBtn = e.target.closest(".alt[data-alt-name]");
+  if(e.target.closest("#toManual") || e.target.closest("#toManualFoot") || e.target.closest("#skipToManual")){ pendingMatch = null; fillForm(false); return showStep("form"); }
+  const altBtn = e.target.closest(".alt[data-alt-index]");
   if(altBtn){
-    if(pendingMatch) pendingMatch.name = altBtn.dataset.altName;
+    const chosen = lastCandidates[Number(altBtn.dataset.altIndex)];
+    if(chosen && pendingMatch){
+      pendingMatch.name = chosen.name;
+      pendingMatch.producer = chosen.producer || null;
+      pendingMatch.vintage = chosen.vintage || null;
+    }
     fillForm(true);
     return showStep("form");
   }
@@ -1111,6 +1204,53 @@ document.addEventListener("click", e => {
       .finally(() => { deletingWine = false; });
     return;
   }
+  if(e.target.closest("#markWine")){
+    if(markingWine) return;
+    const w = WINES.find(x => x.name === lit);
+    if(!w) return;
+    markingWine = true;
+    renderDetailFoot();
+    const action = w.markedForDeletion ? "unmark" : "mark";
+    api(`/api/wines/${w.id}/${action}`, {method:"POST"})
+      .then(loadWines)
+      .then(() => openDetail(w.name))   // re-render the sheet with the new state
+      .finally(() => { markingWine = false; });
+    return;
+  }
+
+  if(e.target.closest("#logout")){
+    api("/api/logout", {method:"POST"}).then(() => location.reload());
+    return;
+  }
+  if(e.target.closest("#manageUsers")){
+    loadUsers();
+    open(document.getElementById("usersSheet"));
+    return;
+  }
+  if(e.target.closest("#createUser")){
+    const username = document.getElementById("nu-username").value.trim();
+    const password = document.getElementById("nu-password").value;
+    const errEl = document.getElementById("userFormError");
+    errEl.style.display = "none";
+    api("/api/users", {method:"POST", body: JSON.stringify({username, password})})
+      .then(() => {
+        document.getElementById("nu-username").value = "";
+        document.getElementById("nu-password").value = "";
+        loadUsers();
+      })
+      .catch(err => {
+        errEl.textContent = err.message.includes("400") || err.message.includes("409")
+          ? "Check the username and password (10+ characters, username not already taken)."
+          : "Something went wrong creating that account.";
+        errEl.style.display = "block";
+      });
+    return;
+  }
+  const delUserBtn = e.target.closest("[data-delete-user]");
+  if(delUserBtn){
+    api(`/api/users/${delUserBtn.dataset.deleteUser}`, {method:"DELETE"}).then(loadUsers);
+    return;
+  }
 
   if(e.target.closest("[data-close]") || e.target === scrim) return closeAll();
 });
@@ -1119,10 +1259,23 @@ document.getElementById("photoInput").addEventListener("change", e => {
   if(e.target.files[0]) runPhotoScan(e.target.files[0]);
 });
 
+async function initUser(){
+  try{
+    currentUser = await api("/api/me");
+  } catch(e){
+    return;  // 401 already triggers a reload via api(); nothing else to do here
+  }
+  document.getElementById("whoami").textContent = currentUser.username;
+  if(currentUser.role === "admin"){
+    document.getElementById("manageUsers").style.display = "";
+  }
+}
+
 document.addEventListener("keydown", e => { if(e.key === "Escape") closeAll(); });
 document.getElementById("search").addEventListener("input", e => { query = e.target.value; renderRack(); });
 document.getElementById("sort").addEventListener("change", e => { sortBy = e.target.value; renderRack(); });
 
+initUser();
 loadWines();
 </script>
 </body>
