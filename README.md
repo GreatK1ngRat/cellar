@@ -1,9 +1,9 @@
 # Cellar
 
-A private, single-user log of wines you'd buy again. Runs as one Docker
-container on your home network. No cloud dependency for the data itself --
-SQLite file on a local volume, password-gated, nothing exposed beyond your LAN
-unless you choose to expose it.
+A private log of wines you'd buy again, shared by whoever you invite onto
+it. Runs as one Docker container on your home network. No cloud dependency
+for the data itself -- SQLite file on a local volume, password-gated,
+nothing exposed beyond your LAN unless you choose to expose it.
 
 ## Why one container, not a stack
 
@@ -41,11 +41,38 @@ one file on a mounted host path.
    docker compose up -d --build
    ```
 
-4. Open `http://<the-machine's-lan-ip>:61618` from any device on your network
-   and log in with `APP_PASSWORD`.
+4. Open `http://<the-machine's-lan-ip>:61618` from any device on your network.
+   Leave the username blank (or type `admin`) and log in with `APP_PASSWORD`
+   -- that's the administrator account. See **Accounts** below for adding
+   other people.
 
 Change the `61618:61618` in `docker-compose.yml` if that port is already in use on
 your network.
+
+## Accounts
+
+There are two kinds of account:
+
+- **Administrator** -- one account, logged into with `APP_PASSWORD` and no
+  username (or the username `admin`). This is the same login that's always
+  existed; adding other accounts doesn't change it. Only the admin can
+  delete a wine outright, and only the admin can create or remove other
+  accounts.
+- **Members** -- created by the admin from the "Manage users" button in
+  the app (visible only when logged in as admin). Each needs a username
+  and a password of at least 10 characters, enforced on the server, not
+  just in the browser. Members can add and edit wines same as admin, but
+  can't delete one outright -- they can only **mark it for deletion**,
+  which flags it (with their name attached) for the admin to actually
+  remove later.
+
+Everyone shares the same list -- there's no per-user view. Every wine
+shows who added it, and a marked-for-deletion wine shows who marked it,
+visible to anyone looking at that entry.
+
+There's currently no self-service password reset or username change --
+if a member is locked out, the admin removes their account and creates a
+new one.
 
 ## Deploying via Portainer
 
@@ -145,12 +172,17 @@ The volume is untouched by rebuilds -- your data survives.
 - **Barcode lookup**: fully working against the live Open Food Facts API.
 - **Label photo identification**: fully working against OpenRouter,
   provided `OPENROUTER_API_KEY` is set. Reads the label directly rather
-  than matching against a fixed database, and returns a wine identity
-  only -- no image, no listing link. See BACKLOG.md for this pipeline's
-  history.
+  than matching against a fixed database, asks for a ranked list of
+  candidates so a low-confidence guess is offered as a pickable option
+  rather than discarded, and returns a wine identity only -- no image, no
+  listing link. See BACKLOG.md for what's still open on this.
 - **Finding a listing image automatically** isn't available -- every
   photo-identified wine saves with no photo unless a barcode match found
   one via Open Food Facts. See BACKLOG.md for why.
+- **Accounts and marking for deletion**: fully working -- passwords are
+  hashed (PBKDF2-SHA256, stdlib only, no extra dependency), the
+  admin/member permission split is enforced server-side on every
+  endpoint, not just hidden in the UI.
 - **Barcode *scanning* from the camera** is not implemented -- there's a
   text field for the barcode number instead of live camera decoding. A
   library like `html5-qrcode` would add that on top of what's here without
