@@ -6,11 +6,11 @@ import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import db, identify
+from . import db, identify, photos
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +26,7 @@ if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY must be set -- see .env.example")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+PHOTOS_DIR = db.DB_PATH.parent / "photos"
 
 MIN_PASSWORD_LENGTH = 10
 
@@ -176,6 +177,7 @@ async def api_update_wine(wine_id: int, request: Request):
 def api_delete_wine(wine_id: int):
     if not db.delete_wine(wine_id):
         raise HTTPException(status_code=404, detail="Not found")
+    (PHOTOS_DIR / f"{wine_id}.jpg").unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -226,6 +228,35 @@ async def api_verify_image(request: Request):
     body = await request.json()
     ok = await identify.verify_image_url(body.get("url", ""))
     return {"valid": ok}
+
+
+@app.post("/api/wines/{wine_id}/photo", dependencies=[Depends(require_auth)])
+async def api_upload_photo(wine_id: int, file: UploadFile = File(...)):
+    if not db.get_wine(wine_id):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    raw = await file.read()
+    try:
+        jpeg_bytes = photos.process_upload(raw)
+    except photos.UnsupportedImage as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+    (PHOTOS_DIR / f"{wine_id}.jpg").write_bytes(jpeg_bytes)
+
+    return db.update_wine(wine_id, {
+        "image_url": f"/api/wines/{wine_id}/photo",
+        "image_source": "uploaded",
+        "image_checked_at": None,
+    })
+
+
+@app.get("/api/wines/{wine_id}/photo", dependencies=[Depends(require_auth)])
+def api_get_photo(wine_id: int):
+    path = PHOTOS_DIR / f"{wine_id}.jpg"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No photo uploaded for this wine")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 # ---- frontend ----------------------------------------------------------------
