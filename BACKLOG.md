@@ -39,3 +39,23 @@ over time. Check openrouter.ai/models for current free, vision-capable
 options before assuming the pinned model still exists or is still free.
 
 ---
+## HEIC photos aren't supported for upload
+
+**Found:** while building manual photo upload -- Pillow can't decode HEIC
+without an extra plugin (`pillow-heif`), which this project deliberately
+hasn't added. Many iPhones save photos as HEIC by default.
+
+**Current behavior:** a HEIC upload is rejected cleanly with a message
+telling the person to use JPEG or PNG instead -- not a crash, just a
+limitation.
+
+**Fix, if it comes up:** add `pillow-heif` to `requirements.txt` and
+register it in `app/photos.py`
+(`from pillow_heif import register_heif_opener; register_heif_opener()`)
+so `Image.open()` handles HEIC transparently. Small, contained change,
+just another real dependency to weigh against how often this is actually
+hit in practice -- many iPhones can also be set to save JPEG instead, or
+the browser's own upload dialog may already convert HEIC on some
+platforms, making this less urgent than it first sounds.
+
+---

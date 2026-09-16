@@ -144,20 +144,22 @@ written to the database without you seeing it first.
 
 ## Backing up your data
 
-Everything that matters lives in a single SQLite file at
-`/opt/docker/cellar/cellar.db` on the host -- that's what the bind mount in
-`docker-compose.yml` points at, so it's just a regular file, not something
-locked inside Docker. Back it up however you'd back up any file:
+Everything that matters lives at `/opt/docker/cellar/` on the host -- the
+SQLite file itself (`cellar.db`), plus a `photos/` subfolder holding
+anything you've uploaded yourself. That's what the bind mount in
+`docker-compose.yml` points at, so it's all just regular files, nothing
+locked inside Docker. Back up the whole directory, not just the database:
 
 ```
-cp /opt/docker/cellar/cellar.db ~/cellar-backup-$(date +%F).db
+cp -r /opt/docker/cellar ~/cellar-backup-$(date +%F)
 ```
 
 or point whatever backup tool you already run at `/opt/docker/cellar/`
 directly.
 
-To restore, stop the container, copy a backup file back to
-`/opt/docker/cellar/cellar.db`, then start it again.
+To restore, stop the container, copy a backup's contents back into
+`/opt/docker/cellar/` (both the `.db` file and the `photos/` folder), then
+start it again.
 
 ## Updating
 
@@ -178,7 +180,16 @@ The volume is untouched by rebuilds -- your data survives.
   listing link. See BACKLOG.md for what's still open on this.
 - **Finding a listing image automatically** isn't available -- every
   photo-identified wine saves with no photo unless a barcode match found
-  one via Open Food Facts. See BACKLOG.md for why.
+  one via Open Food Facts, or you upload one yourself (below). See
+  BACKLOG.md for why automatic image lookup isn't free.
+- **Uploading your own photo**: fully working, from a wine's edit form.
+  Resized and compressed server-side (Pillow -- the one genuinely new
+  dependency in this project) to a 1200px long edge at 85% JPEG quality,
+  which keeps label text legible while shrinking a typical phone photo by
+  roughly 90-95%. Handles portrait photos with EXIF rotation correctly.
+  HEIC (the default format on many iPhones) isn't supported -- use JPEG
+  or PNG. Stored on the same persistent volume as the database, and
+  cleaned up automatically if the wine is deleted.
 - **Accounts and marking for deletion**: fully working -- passwords are
   hashed (PBKDF2-SHA256, stdlib only, no extra dependency), the
   admin/member permission split is enforced server-side on every
