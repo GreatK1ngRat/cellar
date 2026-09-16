@@ -117,12 +117,6 @@ async def api_identify_photo(file: UploadFile = File(...)):
     return result
 
 
-@app.post("/api/identify/text", dependencies=[Depends(require_auth)])
-async def api_identify_text(request: Request):
-    body = await request.json()
-    return await identify.identify_text(body.get("name", ""), body.get("producer"), body.get("vintage"))
-
-
 @app.post("/api/verify-image", dependencies=[Depends(require_auth)])
 async def api_verify_image(request: Request):
     body = await request.json()
