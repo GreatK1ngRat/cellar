@@ -1,5 +1,8 @@
+import hashlib
+import hmac
 import logging
 import os
+import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, Depends
@@ -24,6 +27,8 @@ if not SECRET_KEY:
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+MIN_PASSWORD_LENGTH = 10
+
 app = FastAPI(title="Cellar")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax")
 
@@ -33,9 +38,36 @@ def on_startup():
     db.init_db()
 
 
+# ---- passwords ---------------------------------------------------------------
+# Stdlib PBKDF2-HMAC-SHA256 rather than adding bcrypt/argon2 as a dependency --
+# no C-extension build step, one less thing that can fail in a slim container
+# image, and it's a legitimate, still-recommended choice for this at this scale.
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200_000)
+    return f"{salt}${digest.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt, digest_hex = stored_hash.split("$", 1)
+    except ValueError:
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200_000)
+    return hmac.compare_digest(digest.hex(), digest_hex)
+
+
 def require_auth(request: Request):
     if not request.session.get("authed"):
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+def require_admin(request: Request):
+    if not request.session.get("authed"):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if request.session.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
 
 
 # ---- auth ----------------------------------------------------------------
@@ -43,15 +75,67 @@ def require_auth(request: Request):
 @app.post("/api/login")
 async def login(request: Request):
     body = await request.json()
-    if body.get("password") == APP_PASSWORD:
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+
+    # Blank username, or "admin", logs in with the shared APP_PASSWORD --
+    # the same login that has always worked, unchanged, per the original
+    # requirement that this path never breaks when accounts were added.
+    if not username or username == "admin":
+        if password == APP_PASSWORD:
+            request.session["authed"] = True
+            request.session["role"] = "admin"
+            request.session["username"] = "admin"
+            return {"ok": True}
+        raise HTTPException(status_code=401, detail="Wrong password")
+
+    user = db.get_user_by_username(username)
+    if user and verify_password(password, user["password_hash"]):
         request.session["authed"] = True
+        request.session["role"] = user["role"]
+        request.session["username"] = user["username"]
         return {"ok": True}
-    raise HTTPException(status_code=401, detail="Wrong password")
+    raise HTTPException(status_code=401, detail="Wrong username or password")
 
 
 @app.post("/api/logout")
 async def logout(request: Request):
     request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/api/me", dependencies=[Depends(require_auth)])
+def api_me(request: Request):
+    return {"username": request.session.get("username"), "role": request.session.get("role")}
+
+
+# ---- users (admin only) -----------------------------------------------------
+
+@app.get("/api/users", dependencies=[Depends(require_admin)])
+def api_list_users():
+    return db.list_users()
+
+
+@app.post("/api/users", dependencies=[Depends(require_admin)])
+async def api_create_user(request: Request):
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+
+    if not username or username.lower() == "admin":
+        raise HTTPException(status_code=400, detail="A username is required, and can't be 'admin'")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+    if db.get_user_by_username(username):
+        raise HTTPException(status_code=409, detail="That username is already taken")
+
+    return db.create_user(username, hash_password(password))
+
+
+@app.delete("/api/users/{user_id}", dependencies=[Depends(require_admin)])
+def api_delete_user(user_id: int):
+    if not db.delete_user(user_id):
+        raise HTTPException(status_code=404, detail="Not found")
     return {"ok": True}
 
 
@@ -75,6 +159,7 @@ async def api_create_wine(request: Request):
     data = await request.json()
     if not data.get("name") or not data.get("type"):
         raise HTTPException(status_code=400, detail="name and type are required")
+    data["added_by"] = request.session.get("username")
     return db.create_wine(data)
 
 
@@ -87,11 +172,30 @@ async def api_update_wine(wine_id: int, request: Request):
     return wine
 
 
-@app.delete("/api/wines/{wine_id}", dependencies=[Depends(require_auth)])
+@app.delete("/api/wines/{wine_id}", dependencies=[Depends(require_admin)])
 def api_delete_wine(wine_id: int):
     if not db.delete_wine(wine_id):
         raise HTTPException(status_code=404, detail="Not found")
     return {"ok": True}
+
+
+@app.post("/api/wines/{wine_id}/mark", dependencies=[Depends(require_auth)])
+def api_mark_wine(wine_id: int, request: Request):
+    """The non-admin stand-in for delete -- flags a wine for an admin to
+    remove, rather than removing it directly. Admins can also use this
+    (and just delete outright instead, if they prefer)."""
+    wine = db.mark_wine_for_deletion(wine_id, request.session.get("username"))
+    if not wine:
+        raise HTTPException(status_code=404, detail="Not found")
+    return wine
+
+
+@app.post("/api/wines/{wine_id}/unmark", dependencies=[Depends(require_auth)])
+def api_unmark_wine(wine_id: int):
+    wine = db.unmark_wine(wine_id)
+    if not wine:
+        raise HTTPException(status_code=404, detail="Not found")
+    return wine
 
 
 # ---- identification ---------------------------------------------------------
@@ -149,19 +253,24 @@ LOGIN_PAGE = """<!DOCTYPE html>
          color:#12171a;cursor:pointer;font-weight:500}
   p{color:#e0968d;font-size:13px;margin:0}
   h1{font-family:Georgia,serif;margin:0 0 8px}
+  .hint{color:#8a949b;font-size:12px;margin:-4px 0 4px}
 </style></head><body>
 <form id="f">
   <h1>Cellar.</h1>
-  <input type="password" id="pw" placeholder="Password" autofocus>
+  <input id="user" placeholder="Username (leave blank for admin)" autofocus>
+  <input type="password" id="pw" placeholder="Password">
   <button type="submit">Enter</button>
-  <p id="err" style="display:none">Wrong password.</p>
+  <p id="err" style="display:none">Wrong username or password.</p>
 </form>
 <script>
 document.getElementById('f').addEventListener('submit', async e => {
   e.preventDefault();
   const res = await fetch('/api/login', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({password: document.getElementById('pw').value})
+    body: JSON.stringify({
+      username: document.getElementById('user').value,
+      password: document.getElementById('pw').value
+    })
   });
   if (res.ok) location.reload();
   else document.getElementById('err').style.display = 'block';

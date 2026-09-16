@@ -86,14 +86,19 @@ OPENROUTER_PROMPT = """Read this photo of a wine label.
 Respond with ONLY a single JSON object, no markdown code fences, no
 explanation before or after it. Use this exact shape:
 
-{"legible": true or false, "name": string or null, "producer": string or null,
- "vintage": string or null, "confidence": a number from 0 to 1 for how sure
- you are this reading is correct}
+{"legible": true or false,
+ "candidates": [
+   {"name": string, "producer": string or null, "vintage": string or null,
+    "confidence": a number from 0 to 1}
+ ]}
 
-Only fill in a field if it is actually printed on the label -- if something
-is not legible or not present, use null for it rather than guessing. If the
-photo is too blurry, dark, or cropped to read at all, set legible to false
-and leave the other fields null."""
+List up to 3 candidates, ordered from most to least confident, for what
+this wine might be. Usually there is only one real answer and the rest
+would be near-duplicates or guesses at ambiguous text -- only include more
+than one if the label genuinely supports more than one reading. Only fill
+in producer or vintage if it is actually printed on the label -- use null
+rather than guessing. If the photo is too blurry, dark, or cropped to read
+at all, set legible to false and candidates to an empty list."""
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -122,6 +127,10 @@ async def identify_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
     """Tier 2: a free vision-capable model via OpenRouter reads the label
     directly. No fixed label database, no web search -- it reads whatever
     text and imagery is actually in the photo and reports what it found.
+
+    Asks for a ranked list of candidates rather than one guess, so a
+    photo with a plausible-but-uncertain reading can still be offered as
+    a pickable option instead of being discarded as "no match."
 
     Like every other tier here, this only identifies the wine -- no
     listing image or URL. See BACKLOG.md for that history.
@@ -171,26 +180,40 @@ async def identify_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> d
                 "error": "Could not parse OpenRouter's response"}
 
     legible = bool(parsed.get("legible"))
-    confidence = parsed.get("confidence") or 0
-    name = parsed.get("name")
+    raw_candidates = parsed.get("candidates") or []
+    # Filter to usable entries and sort by confidence, defensively -- don't
+    # trust the model to order them correctly or to only include named ones.
+    candidates = sorted(
+        (c for c in raw_candidates if isinstance(c, dict) and c.get("name")),
+        key=lambda c: c.get("confidence") or 0,
+        reverse=True,
+    )
 
-    logger.info("identify_photo: OpenRouter (%s) legible=%s name=%r confidence=%s",
-                OPENROUTER_MODEL, legible, name, confidence)
+    logger.info("identify_photo: OpenRouter (%s) legible=%s candidates=%d top=%r",
+                OPENROUTER_MODEL, legible, len(candidates),
+                candidates[0].get("name") if candidates else None)
 
-    if not legible or not name:
-        return {"legible": legible, "listing_found": False, "listing_confidence": 0}
+    if not legible or not candidates:
+        return {"legible": legible, "listing_found": False, "listing_confidence": 0, "candidates": []}
+
+    top = candidates[0]
+    top_confidence = top.get("confidence") or 0
 
     return {
         "legible": True,
-        "listing_found": confidence >= MATCH_CONFIDENCE_THRESHOLD,
-        "listing_confidence": confidence,
-        "name": name,
-        "producer": parsed.get("producer"),
-        "vintage": parsed.get("vintage"),
+        "listing_found": top_confidence >= MATCH_CONFIDENCE_THRESHOLD,
+        "listing_confidence": top_confidence,
+        "name": top.get("name"),
+        "producer": top.get("producer"),
+        "vintage": top.get("vintage"),
         "wine_type": None,
         "image_url": None,
         "image_source": None,
-        "candidates": [],
+        "candidates": [
+            {"name": c.get("name"), "producer": c.get("producer"),
+             "vintage": c.get("vintage"), "confidence": c.get("confidence") or 0}
+            for c in candidates[1:4]
+        ],
     }
 
 
