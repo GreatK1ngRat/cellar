@@ -271,9 +271,6 @@
   .dropzone span{font-size:13px;color:var(--chalk-dim)}
   .dropzone svg{margin-bottom:var(--s3);color:var(--chalk-dim)}
 
-  .scan-hint{font-family:"Bodoni Moda",Georgia,serif;font-size:17px;line-height:1.6;
-    margin-top:var(--s4);padding-top:var(--s3);border-top:1px solid var(--rule);max-width:42ch}
-
   .scanning{padding:var(--s6) 0}
   .lamp{width:22px;height:22px;border:1px solid var(--chalk-faint);border-top-color:var(--tallow);
     margin-bottom:var(--s5);animation:spin 1.1s linear infinite}
@@ -321,6 +318,8 @@
   .field textarea{font-family:"Bodoni Moda",Georgia,serif;font-size:16px;min-height:88px;
     resize:vertical;line-height:1.6}
   .field-row{display:flex;gap:var(--s3)}
+  .upload-status{font-size:12px;color:var(--chalk-dim);margin-top:var(--s2)}
+  .upload-status.upload-error{color:var(--tallow)}
   .field-row .field{flex:1}
 
   .mock-note{margin-top:var(--s6);padding-top:var(--s3);border-top:1px dashed var(--chalk-faint);
@@ -405,10 +404,6 @@
 
   <section class="said" id="said"></section>
 
-  <section class="band">
-    <p>Images are linked from listings, not stored.</p>
-  </section>
-
   <footer>
     <span>Kept by hand, one bottle at a time</span>
     <span id="shownCount"></span>
@@ -477,12 +472,8 @@
         <strong>Photograph the label</strong>
         <span>No barcode, or it didn't match — try the label instead</span>
       </button>
-      <p class="scan-hint">
-        Your photo is only used to identify the wine. Once it's matched, the app links to the
-        listing's image and discards what you took.
-      </p>
       <button class="alt" id="skipToManual" style="margin-top:var(--s4)">
-        Or enter it myself, no scanning
+        Manual Entry
       </button>
     </div>
 
@@ -527,6 +518,12 @@
     <!-- 4. details -->
     <div class="step" id="step-form">
       <div class="banner" id="formBanner"></div>
+
+      <div class="field" id="photoUploadField" style="display:none">
+        <label for="f-photo">Photo</label>
+        <input type="file" id="f-photo" accept="image/*">
+        <p class="upload-status" id="photoUploadStatus"></p>
+      </div>
 
       <div class="field">
         <label for="f-name">Wine name</label>
@@ -802,9 +799,11 @@ function renderRack(){
 /* What the person wrote, in the wine's own typeface; what the app looked up, in the app's. */
 function renderSaid(w){
   if(!w) return;
-  const src = w.imageSource
-    ? `<div><dt>Image linked from</dt><dd>${w.imageSource}, checked ${fmtDate(w.imageChecked)}</dd></div>`
-    : `<div><dt>Image</dt><dd class="none">None found</dd></div>`;
+  const src = w.imageSource === "uploaded"
+    ? `<div><dt>Image</dt><dd>You uploaded this</dd></div>`
+    : w.imageSource
+      ? `<div><dt>Image linked from</dt><dd>${w.imageSource}, checked ${fmtDate(w.imageChecked)}</dd></div>`
+      : `<div><dt>Image</dt><dd class="none">None found</dd></div>`;
   const addedBy = w.addedBy
     ? `<div><dt>Added by</dt><dd>${w.addedBy}</dd></div>` : "";
   const marked = w.markedForDeletion
@@ -867,10 +866,12 @@ function openDetail(name){
   confirmingDelete = false;
   deletingWine = false;
 
-  const imgRows = w.imageSource
-    ? `<div class="fact"><dt>Image from</dt><dd><a href="#" onclick="return false">${w.imageSource}</a></dd></div>
-       <div class="fact"><dt>Link checked</dt><dd>${fmtDate(w.imageChecked)}</dd></div>`
-    : `<div class="fact"><dt>Image</dt><dd class="none">None found — try scanning again</dd></div>`;
+  const imgRows = w.imageSource === "uploaded"
+    ? `<div class="fact"><dt>Image</dt><dd>You uploaded this</dd></div>`
+    : w.imageSource
+      ? `<div class="fact"><dt>Image from</dt><dd><a href="#" onclick="return false">${w.imageSource}</a></dd></div>
+         <div class="fact"><dt>Link checked</dt><dd>${fmtDate(w.imageChecked)}</dd></div>`
+      : `<div class="fact"><dt>Image</dt><dd class="none">None found — try scanning again</dd></div>`;
   const addedByRow = w.addedBy
     ? `<div class="fact"><dt>Added by</dt><dd>${w.addedBy}</dd></div>` : "";
   const markedBanner = w.markedForDeletion
@@ -1054,6 +1055,9 @@ function fillForm(matched){
 function openEditForm(w){
   editingId = w.id;
   pendingMatch = null;
+  document.getElementById("photoUploadField").style.display = "";
+  document.getElementById("photoUploadStatus").textContent = "";
+  document.getElementById("f-photo").value = "";
   document.getElementById("f-name").value = w.name || "";
   document.getElementById("f-producer").value = w.producer || "";
   document.getElementById("f-type").value = ({red:"Red",white:"White",rose:"Rosé",sparkling:"Sparkling",dessert:"Dessert",fortified:"Fortified"})[w.type] || "Red";
@@ -1154,6 +1158,7 @@ document.addEventListener("click", e => {
   if(e.target.closest("#openAdd")){
     editingId = null; pendingMatch = null;
     document.getElementById("f-barcode").value = "";
+    document.getElementById("photoUploadField").style.display = "none";
     ["f-name","f-producer","f-vintage","f-region","f-grape","f-where","f-source","f-price","f-notes"]
       .forEach(id => document.getElementById(id).value = "");
     showStep("capture");
@@ -1257,6 +1262,31 @@ document.addEventListener("click", e => {
 
 document.getElementById("photoInput").addEventListener("change", e => {
   if(e.target.files[0]) runPhotoScan(e.target.files[0]);
+});
+
+document.getElementById("f-photo").addEventListener("change", async e => {
+  const file = e.target.files[0];
+  const status = document.getElementById("photoUploadStatus");
+  if(!file || !editingId) return;
+
+  status.textContent = "Uploading…";
+  status.className = "upload-status";
+
+  const body = new FormData();
+  body.append("file", file);
+  try{
+    const res = await fetch(`/api/wines/${editingId}/photo`, {method:"POST", body});
+    if(res.status === 401){ location.reload(); return; }
+    if(!res.ok){
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Upload failed (${res.status})`);
+    }
+    status.textContent = "Photo saved.";
+    await loadWines();
+  } catch(err){
+    status.textContent = err.message;
+    status.className = "upload-status upload-error";
+  }
 });
 
 async function initUser(){
