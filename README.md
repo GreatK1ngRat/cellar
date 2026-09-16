@@ -31,9 +31,10 @@ one file on a mounted host path.
      ```
      python3 -c "import secrets; print(secrets.token_hex(32))"
      ```
-   - `GEMINI_API_KEY` is optional. Without it, barcode lookup (free,
+   - `OPENROUTER_API_KEY` is optional. Without it, barcode lookup (free,
      unlimited, via Open Food Facts) still works. The label-photo fallback
-     needs it -- get a free key at https://aistudio.google.com/apikey.
+     needs it -- get a free key at https://openrouter.ai (no credit card
+     required for the free tier).
 
 3. Build and start:
    ```
@@ -69,8 +70,8 @@ redeployment on future changes for free.
 3. Fill in the repo URL, the branch, and `docker-compose.yml` as the
    Compose path.
 4. Under **Environment variables**, add `APP_PASSWORD`, `SECRET_KEY`,
-   `GEMINI_API_KEY`, and `GEMINI_MODEL` -- the same values that would
-   otherwise go in `.env`. Portainer injects these into the same
+   `OPENROUTER_API_KEY`, and `OPENROUTER_MODEL` -- the same values that
+   would otherwise go in `.env`. Portainer injects these into the same
    `${VARIABLE}` slots in `docker-compose.yml`, so don't commit a real
    `.env` file to the repo.
 5. **Deploy the stack.** Portainer clones the repo and builds the image
@@ -104,11 +105,12 @@ edits to the app.
    grocery-store wine, so this misses often for small producers or
    restaurant pours -- that's expected.
 2. **Label photo** -- if there's no barcode or it doesn't match, take a
-   photo of the label instead. Gemini reads it and searches for a listing
-   in one call. Free up to Google's monthly quota, which a personal wine
-   log won't come close to.
+   photo of the label instead. A free vision-capable model via OpenRouter
+   reads it directly. It only identifies the wine -- no web search, no
+   listing or image -- so a match this way still saves with no photo, same
+   as manual entry.
 3. **Manual entry** -- if both miss, or you just want to type it yourself,
-   the form is always right there, pre-filled with whatever was read.
+   the form is always right there, pre-filled with whatever was identified.
 
 Every match is shown to you to confirm before it's saved -- nothing gets
 written to the database without you seeing it first.
@@ -141,11 +143,14 @@ The volume is untouched by rebuilds -- your data survives.
 ## What's stubbed vs real
 
 - **Barcode lookup**: fully working against the live Open Food Facts API.
-- **Label photo identification**: fully working against the live Gemini
-  API, provided `GEMINI_API_KEY` is set. The prompt and response schema
-  are wired up for the current Gemini Interactions API as documented at
-  the time this was built -- if Google changes that API shape, this is
-  the first place to check.
+- **Label photo identification**: fully working against OpenRouter,
+  provided `OPENROUTER_API_KEY` is set. Reads the label directly rather
+  than matching against a fixed database, and returns a wine identity
+  only -- no image, no listing link. See BACKLOG.md for this pipeline's
+  history.
+- **Finding a listing image automatically** isn't available -- every
+  photo-identified wine saves with no photo unless a barcode match found
+  one via Open Food Facts. See BACKLOG.md for why.
 - **Barcode *scanning* from the camera** is not implemented -- there's a
   text field for the barcode number instead of live camera decoding. A
   library like `html5-qrcode` would add that on top of what's here without

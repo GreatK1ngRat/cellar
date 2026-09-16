@@ -1,7 +1,7 @@
 services:
   cellar:
     build: .
-    container_name: Cellar
+    container_name: cellar
     restart: unless-stopped
     ports:
       - "61618:61618"
