@@ -1,14 +1,14 @@
 services:
   cellar:
     build: .
-    container_name: cellar
+    container_name: Cellar
     restart: unless-stopped
     ports:
       - "61618:61618"
     environment:
       APP_PASSWORD: ${APP_PASSWORD}
       SECRET_KEY: ${SECRET_KEY}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-inclusionai/ling-3.0-flash-vl:free}
     volumes:
       - /opt/docker/cellar:/app/data
